@@ -1,0 +1,22 @@
+# User-space build products
+*.o
+*.d
+seqgenex0
+seqgen
+seqgen2
+clock_times
+
+# Kernel module build products
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+Module.symvers
+modules.order
+.tmp_versions/
+.*.cmd
+
+# Editor / OS
+*~
+*.swp
+.DS_Store
