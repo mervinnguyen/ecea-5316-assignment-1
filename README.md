@@ -1,4 +1,4 @@
-# ECEA-5316 Assignment 1 — Sequencer Generic
+# ECEA-5316 Assignment 1: Sequencer Generic
 
 Periodic real-time service sequencer examples for CU Boulder's Real-Time Embedded Systems course (ECEA-5316). Starter code is based on Sam Siewert's sequencer generic examples.
 
