@@ -16,6 +16,9 @@ modules.order
 .tmp_versions/
 .*.cmd
 
+# Local tooling (not part of the assignment)
+.tools/
+
 # Editor / OS
 *~
 *.swp

@@ -1,42 +1,44 @@
 # ECEA-5316 Assignment 1: Sequencer Generic
 
-Periodic real-time service sequencer examples for CU Boulder's Real-Time Embedded Systems course (ECEA-5316). Starter code is based on Sam Siewert's sequencer generic examples.
+Emulates the Example 0 timing diagram (`sched-example-0-safe-within-LUB-disharmonic`) with three `SCHED_FIFO` service threads and Fibonacci fake workloads.
 
-## What's here
+## Example 0 schedule (time unit = 10 ms)
 
-| File | Purpose |
-| --- | --- |
-| `seqgenex0.c` | Example 0 sequencer (S1/S2/S3) with Rate Monotonic priorities |
-| `seqgen.c`, `seqgen2.c` | Fuller multi-service sequencer examples |
-| `seqgen.h` | Shared timing constants and service prototypes |
-| `clock_times.c` | POSIX clock / resolution check utility |
-| `raspbian-ccr/` | Kernel module to enable user-level cycle-counter access on ARM |
-| `syslog-trace.txt`, `syslog-trace-2x.txt` | Sample sequencer syslog traces |
+| Service | Period T | Execution C | Deadline | Sequencer rate |
+| --- | --- | --- | --- | --- |
+| Sequencer | 1 | — | — | 100 Hz |
+| S1 / Thread 1 | 2 (20 ms) | 1 (10 ms) | T | every 2nd tick (50 Hz) |
+| S2 / Thread 2 | 10 (100 ms) | 1 (10 ms) | T | every 10th tick (10 Hz) |
+| S3 / Thread 3 | 15 (150 ms) | 2 (20 ms) | T | every 15th tick (6.67 Hz) |
 
-Example 0 rates (from `seqgenex0.c`):
-
-- Sequencer @ 100 Hz
-- Service 1 @ 50 Hz (`T=2`)
-- Service 2 @ 10 Hz (`T=10`)
-- Service 3 @ 6.67 Hz (`T=15`)
+Utilization: `U = 1/2 + 1/10 + 2/15 ≈ 0.733`, which is below the n=3 RM LUB (~0.780). Verify this chart in Cheddar using the course Excel file.
 
 ## Build
 
 ```bash
-make
+make seqgenex0
 ```
-
-This produces `seqgenex0`, `seqgen`, `seqgen2`, and `clock_times`.
 
 ## Run
 
-These programs use real-time scheduling (`SCHED_FIFO`) and typically need elevated privileges:
+Needs `SCHED_FIFO` privileges. All four threads are pinned to one CPU core.
 
 ```bash
 sudo ./seqgenex0
+./capture-syslog.sh assignment1-syslog.txt
 ```
 
-Before running, confirm CPU cores are online and the platform has usable timer resolution (`lscpu`, `/proc/timer_list`). Sequencer events are logged with `syslog`.
+The default run is 2400 sequencer periods at 100 Hz (about 24 seconds).
+
+## Required syslog format
+
+Every program log is tagged `[COURSE:2][ASSIGNMENT:1]`. Service lines look like:
+
+```text
+[COURSE:2][ASSIGNMENT:1]: Thread 1 start 3 @ 0.040000 sec on core 3
+```
+
+`capture-syslog.sh` writes `uname -a` as the first line of the submission file, then the tagged events.
 
 To remove build artifacts:
 
