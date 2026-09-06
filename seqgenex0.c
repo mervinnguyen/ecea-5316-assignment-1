@@ -49,14 +49,25 @@
 
 #include <syslog.h>
 #include <sys/time.h>
+#include <sys/utsname.h>
 #include <errno.h>
 #include "seqgen.h"
 #include <sys/sysinfo.h>
+#include <string.h>
 
 #define ABS_DELAY
 #define DRIFT_CONTROL
 #define NUM_THREADS (3+1)
 
+#define COURSE_NUM 2
+#define ASSIGNMENT_NUM 1
+#define SUBMIT_LOG_PATH "syslog-prog2.txt"
+
+/* Example 0 (10 ms time unit): C1=1, C2=1, C3=2 */
+#define C1_UNITS (1)
+#define C2_UNITS (1)
+#define C3_UNITS (2)
+#define FIB_TEST_ITER (18)
 
 int abortTest=FALSE;
 int abortS1=FALSE, abortS2=FALSE, abortS3=FALSE;
@@ -69,28 +80,127 @@ pthread_attr_t main_attr;
 int rt_max_prio, rt_min_prio;
 struct sched_param rt_param[NUM_THREADS];
 threadParams_t threadParams[NUM_THREADS];
+static FILE *submit_fp = NULL;
+static pthread_mutex_t log_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static unsigned int fibonacci(unsigned int n)
+{
+    if (n < 2)
+        return n;
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
 
+/* Burn C time-units (each unit = one sequencer period) with Fibonacci work. */
+static void fake_workload(int c_units)
+{
+    const double duration_sec =
+        (double)c_units * ((double)RTSEQ_DELAY_NSEC / (double)NANOSEC_PER_SEC);
+    double start = getTimeMsec();
+    volatile unsigned int sink = 0;
 
-void main(void)
+    while ((getTimeMsec() - start) < duration_sec)
+        sink += fibonacci(FIB_TEST_ITER);
+
+    (void)sink;
+}
+
+static void log_uname(void)
+{
+    struct utsname uts;
+
+    if (uname(&uts) == 0)
+        syslog(LOG_CRIT, "[COURSE:%d][ASSIGNMENT:%d]: %s %s %s %s %s",
+               COURSE_NUM, ASSIGNMENT_NUM,
+               uts.sysname, uts.nodename, uts.release, uts.version, uts.machine);
+}
+
+static void mark_start_time(void)
+{
+    struct timespec event_ts = {0, 0};
+
+    clock_gettime(CLOCK_REALTIME, &event_ts);
+    start_time = ((event_ts.tv_sec) + ((event_ts.tv_nsec) / (double)NANOSEC_PER_SEC));
+}
+
+static void log_thread_start(int thread_id, unsigned long long start_count)
+{
+    struct timespec ts;
+    struct tm tm_now;
+    time_t now;
+    char tstamp[32];
+    char host[256];
+    int core;
+
+    double elapsed = getTimeMsec();
+
+    if (elapsed < 0.0)
+        elapsed = 0.0;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    now = ts.tv_sec;
+    localtime_r(&now, &tm_now);
+    strftime(tstamp, sizeof(tstamp), "%b %e %H:%M:%S", &tm_now);
+    gethostname(host, sizeof(host));
+    core = sched_getcpu();
+
+    syslog(LOG_ERR,
+           "[COURSE:%d][ASSIGNMENT:%d]: Thread %d start %llu @ %.6f on core %d",
+           COURSE_NUM, ASSIGNMENT_NUM,
+           thread_id, start_count, elapsed, core);
+
+    pthread_mutex_lock(&log_lock);
+    if (submit_fp != NULL)
+    {
+        fprintf(submit_fp,
+                "%s %s [COURSE:%d][ASSIGNMENT:%d]: Thread %d start %llu @ %.6f on core %d\n",
+                tstamp, host,
+                COURSE_NUM, ASSIGNMENT_NUM,
+                thread_id, start_count, elapsed, core);
+        fflush(submit_fp);
+    }
+    pthread_mutex_unlock(&log_lock);
+}
+
+int main(void)
 {
     double current_time;
-    struct timespec rt_res, monotonic_res;
-    int i, rc, cpuidx;
+    struct timespec rt_res;
+    int i, rc, cpuidx, nprocs;
     cpu_set_t threadcpu;
     struct sched_param main_param;
     pid_t mainpid;
 
-    start_time=getTimeMsec();
+    FILE *uname_fp;
+    char uname_line[512];
+
+    openlog("seqgenex0", LOG_PID | LOG_CONS, LOG_USER);
+    log_uname();
+    mark_start_time();
+
+    submit_fp = fopen(SUBMIT_LOG_PATH, "w");
+    if (submit_fp == NULL)
+    {
+        perror("fopen syslog-prog2.txt");
+        exit(-1);
+    }
+    uname_fp = popen("uname -a", "r");
+    if (uname_fp != NULL)
+    {
+        if (fgets(uname_line, sizeof(uname_line), uname_fp) != NULL)
+            fputs(uname_line, submit_fp);
+        pclose(uname_fp);
+        fflush(submit_fp);
+    }
 
     // delay start for a second
     usleep(1000000);
 
-    printf("Starting High Rate Sequencer Example\n");
+    printf("Starting High Rate Sequencer Example 0\n");
     get_cpu_core_config();
 
     clock_getres(CLOCK_REALTIME, &rt_res);
-    printf("RT clock resolution is %d sec, %d nsec\n", rt_res.tv_sec, rt_res.tv_nsec);
+        printf("RT clock resolution is %ld sec, %ld nsec\n",
+            (long)rt_res.tv_sec, (long)rt_res.tv_nsec);
 
    printf("System has %d processors configured and %d available.\n", get_nprocs_conf(), get_nprocs());
 
@@ -121,8 +231,10 @@ void main(void)
     for(i=0; i < NUM_THREADS; i++)
     {
 
+      nprocs = get_nprocs();
+      cpuidx = (nprocs > 0) ? (nprocs - 1) : 0;
+
       CPU_ZERO(&threadcpu);
-      cpuidx=(3);
       CPU_SET(cpuidx, &threadcpu);
 
       rc=pthread_attr_init(&rt_sched_attr[i]);
@@ -139,7 +251,8 @@ void main(void)
     printf("Service threads will run on %d CPU cores\n", CPU_COUNT(&threadcpu));
 
     current_time=getTimeMsec();
-    syslog(LOG_CRIT, "RTMAIN: on cpu=%d @ sec=%lf, elapsed=%lf\n", sched_getcpu(), start_time, current_time);
+    syslog(LOG_CRIT, "[COURSE:%d][ASSIGNMENT:%d]: RTMAIN on cpu=%d @ %.6f sec",
+           COURSE_NUM, ASSIGNMENT_NUM, sched_getcpu(), current_time);
 
 
     // Create Service threads which will block awaiting release for:
@@ -187,21 +300,35 @@ void main(void)
     printf("Start sequencer\n");
     threadParams[0].sequencePeriods=RTSEQ_PERIODS;
 
-    // Sequencer = RT_MAX	@ 1000 Hz
+    // Sequencer = RT_MAX	@ 100 Hz
     //
+    mark_start_time();
     rt_param[0].sched_priority=rt_max_prio;
     pthread_attr_setschedparam(&rt_sched_attr[0], &rt_param[0]);
     rc=pthread_create(&threads[0], &rt_sched_attr[0], Sequencer, (void *)&(threadParams[0]));
     if(rc < 0)
         perror("pthread_create for sequencer service 0");
     else
-        printf("pthread_create successful for sequeencer service 0\n");
+        printf("pthread_create successful for sequencer service 0\n");
+
+    printf("Running %llu sequencer periods (about %.1f seconds). Events go to syslog.\n",
+           (unsigned long long)RTSEQ_PERIODS,
+           (double)RTSEQ_PERIODS * ((double)RTSEQ_DELAY_NSEC / (double)NANOSEC_PER_SEC));
+    fflush(stdout);
 
 
    for(i=0;i<NUM_THREADS;i++)
        pthread_join(threads[i], NULL);
 
    printf("\nTEST COMPLETE\n");
+   if (submit_fp != NULL)
+   {
+       fclose(submit_fp);
+       submit_fp = NULL;
+       printf("Wrote %s\n", SUBMIT_LOG_PATH);
+   }
+   closelog();
+   return 0;
 }
 
 
@@ -211,8 +338,7 @@ void *Sequencer(void *threadp)
     struct timespec std_delay_time = {0, RTSEQ_DELAY_NSEC};
     struct timespec current_time_val={0,0};
 
-    struct timespec remaining_time;
-    double current_time, last_time, scaleDelay;
+    double current_time, last_time;
     double delta_t=(RTSEQ_DELAY_NSEC/(double)NANOSEC_PER_SEC);
     double scale_dt;
     int rc, delay_cnt=0;
@@ -221,7 +347,8 @@ void *Sequencer(void *threadp)
 
     current_time=getTimeMsec(); last_time=current_time-delta_t;
 
-    syslog(LOG_CRIT, "RTSEQ: start on cpu=%d @ sec=%lf after %lf with dt=%lf\n", sched_getcpu(), current_time, last_time, delta_t);
+    syslog(LOG_CRIT, "[COURSE:%d][ASSIGNMENT:%d]: RTSEQ start on cpu=%d @ %.6f sec",
+           COURSE_NUM, ASSIGNMENT_NUM, sched_getcpu(), current_time);
 
     do
     {
@@ -261,7 +388,8 @@ void *Sequencer(void *threadp)
 
             if(rc == EINTR)
             { 
-                syslog(LOG_CRIT, "RTSEQ: EINTR @ sec=%lf\n", current_time);
+                syslog(LOG_CRIT, "[COURSE:%d][ASSIGNMENT:%d]: RTSEQ EINTR @ sec=%lf",
+                       COURSE_NUM, ASSIGNMENT_NUM, current_time);
                 delay_cnt++;
             }
             else if(rc < 0)
@@ -274,8 +402,6 @@ void *Sequencer(void *threadp)
            
         } while(rc == EINTR);
 
-
-        syslog(LOG_CRIT, "RTSEQ: cycle %08llu @ sec=%lf, last=%lf, dt=%lf, sdt=%lf\n", seqCnt, current_time, last_time, (current_time-last_time), scale_dt);
 
         // Release each service at a sub-rate of the generic sequencer rate
 
@@ -293,8 +419,8 @@ void *Sequencer(void *threadp)
 
     } while(!abortTest && (seqCnt < threadParams->sequencePeriods));
 
-    sem_post(&semS1); sem_post(&semS2); sem_post(&semS3);
     abortS1=TRUE; abortS2=TRUE; abortS3=TRUE;
+    sem_post(&semS1); sem_post(&semS2); sem_post(&semS3);
 
     pthread_exit((void *)0);
 }
@@ -303,20 +429,18 @@ void *Sequencer(void *threadp)
 
 void *Service_1(void *threadp)
 {
-    double current_time;
     unsigned long long S1Cnt=0;
     threadParams_t *threadParams = (threadParams_t *)threadp;
 
-    current_time=getTimeMsec();
-    //syslog(LOG_CRIT, "S1: start on cpu=%d @ sec=%lf\n", sched_getcpu(), current_time);
+    (void)threadParams;
 
     while(!abortS1)
     {
         sem_wait(&semS1);
+        if(abortS1) break;
         S1Cnt++;
-
-        current_time=getTimeMsec();
-        syslog(LOG_CRIT, "S1: release %llu @ sec=%lf\n", S1Cnt, current_time);
+        log_thread_start(1, S1Cnt);
+        fake_workload(C1_UNITS);
     }
 
     pthread_exit((void *)0);
@@ -325,20 +449,18 @@ void *Service_1(void *threadp)
 
 void *Service_2(void *threadp)
 {
-    double current_time;
     unsigned long long S2Cnt=0;
     threadParams_t *threadParams = (threadParams_t *)threadp;
 
-    current_time=getTimeMsec();
-    //syslog(LOG_CRIT, "S2: start on cpu=%d @ sec=%lf\n", sched_getcpu(), current_time);
+    (void)threadParams;
 
     while(!abortS2)
     {
         sem_wait(&semS2);
+        if(abortS2) break;
         S2Cnt++;
-
-        current_time=getTimeMsec();
-        syslog(LOG_CRIT, "S2: release %llu @ sec=%lf\n", S2Cnt, current_time);
+        log_thread_start(2, S2Cnt);
+        fake_workload(C2_UNITS);
     }
 
     pthread_exit((void *)0);
@@ -347,20 +469,18 @@ void *Service_2(void *threadp)
 
 void *Service_3(void *threadp)
 {
-    double current_time;
     unsigned long long S3Cnt=0;
     threadParams_t *threadParams = (threadParams_t *)threadp;
 
-    current_time=getTimeMsec();
-    //syslog(LOG_CRIT, "S3: start on cpu=%d @ sec=%lf\n", sched_getcpu(), current_time);
+    (void)threadParams;
 
     while(!abortS3)
     {
         sem_wait(&semS3);
+        if(abortS3) break;
         S3Cnt++;
-
-        current_time=getTimeMsec();
-        syslog(LOG_CRIT, "S3: release %llu @ sec=%lf\n", S3Cnt, current_time);
+        log_thread_start(3, S3Cnt);
+        fake_workload(C3_UNITS);
     }
 
     pthread_exit((void *)0);
